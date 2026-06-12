@@ -61,6 +61,10 @@ fillColorCode，旧 fillV2 残留在数据里。已在真实样本验证（显�
 
 ## 文本
 
+- **非矩形形状按内接矩形排版**（`SHAPE_TEXT_INSET`）：菱形 1/2、椭圆 1/√2，
+  零内边距、不裁剪（过长时对称溢出）。飞书按内接矩形换行——源图验证
+  99px 宽菱形里 "badcase/分析结果" 两行各约 48px。直接用外接矩形会让
+  文字戳出斜边
 - 默认保留飞书原始 `textV2.fontSize`；`--fit-text` 仅在溢出时按盒尺寸缩字
   （`fitted_font_size`）
 - `horizontalAlign` / `verticalAlign` 是独立轴，分开映射 flex 属性

@@ -63,6 +63,24 @@ SHAPE_DEFAULT_FILL = {
     SHAPE_CARD: "#5178c6",
 }
 
+# 非矩形形状的文字排版区 = 内接矩形（菱形精确值 1/2，椭圆 1/sqrt(2)）。
+# 飞书按内接矩形换行（源图验证: 99px 宽菱形里两行各约 48px），
+# 直接用外接矩形会让文字戳出斜边。
+SHAPE_TEXT_INSET = {
+    SHAPE_DIAMOND: 0.5,
+    SHAPE_ELLIPSE: 0.7071,
+    SHAPE_DASHED_ELLIPSE: 0.7071,
+}
+
+
+def text_box(info: dict[str, Any]) -> tuple[float, float, float, float]:
+    x, y, width, height = base_rect(info)
+    factor = SHAPE_TEXT_INSET.get((info.get("compositeShape") or {}).get("shapeType"))
+    if not factor:
+        return x, y, width, height
+    box_w, box_h = width * factor, height * factor
+    return x + (width - box_w) / 2, y + (height - box_h) / 2, box_w, box_h
+
 DARK_TEXT = "#1f2430"
 STICKY_FILL = "#fff0c2"
 MIND_LINE = "#5d82c8"
@@ -581,10 +599,12 @@ def render_text(node: dict[str, Any], *, fit_text: bool = False) -> str:
     text_v2 = info.get("textV2")
     if not text_v2 or not text_v2.get("text"):
         return ""
-    x, y, width, height = base_rect(info)
+    x, y, width, height = text_box(info)
+    is_inset = (x, y, width, height) != base_rect(info)
     is_mind_leaf = bool(info.get("mindMap")) and info.get("compositeShape", {}).get("shapeType") == SHAPE_MIND_TEXT
     is_standalone_text = "compositeShape" not in info and not info.get("mindMap")
-    clip = not (is_mind_leaf or is_standalone_text)
+    # 内接矩形排版的形状不裁剪: 文字过长时对称溢出，和飞书行为一致
+    clip = not (is_mind_leaf or is_standalone_text or is_inset)
     return tag(
         "foreignObject",
         {
@@ -598,7 +618,7 @@ def render_text(node: dict[str, Any], *, fit_text: bool = False) -> str:
             text_v2,
             width,
             height,
-            plain=is_standalone_text or is_mind_leaf,
+            plain=is_standalone_text or is_mind_leaf or is_inset,
             forced_color=forced_text_color(info),
             fit=fit_text and not (is_mind_leaf or is_standalone_text),
             clip=clip,
