@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+output/
+*.har
+*.HAR
+.DS_Store

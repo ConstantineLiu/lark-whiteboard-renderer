@@ -1,0 +1,4 @@
+interface:
+  display_name: "Feishu Whiteboard HAR"
+  short_description: "Render Feishu HAR whiteboards to SVG"
+  default_prompt: "Use $feishu-whiteboard-har to extract whiteboards from this HAR and render SVG previews."
