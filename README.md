@@ -53,12 +53,12 @@ output/
 5. 点击 **Export HAR…**（不要右键单个请求导出，要导出完整 Network 记录）
 6. 保存 `.har` 文件，传给脚本处理
 
-## Codex / Agent 集成
+## Agent 集成
 
-本项目同时是一个 [OpenAI Codex skill](https://openai.com/index/codex/)。将本目录放到 `~/.codex/skills/` 下，然后对 agent 说：
+本项目可作为 coding agent 的 skill 使用。将本目录放到 agent 的 skills 目录下，然后对 agent 说：
 
 ```
-用 feishu-whiteboard-har 处理这个 HAR：/path/to/file.har，生成 SVG 给我看。
+用 lark-whiteboard-renderer 处理这个 HAR：/path/to/file.har，生成 SVG 给我看。
 ```
 
 详见 `SKILL.md`。
@@ -133,12 +133,12 @@ output/
 5. Click **Export HAR…** (do NOT right-click a single request — export the full network log)
 6. Save the `.har` file and pass it to the script
 
-### Codex / Agent Integration
+### Agent Integration
 
-This project is also an [OpenAI Codex skill](https://openai.com/index/codex/). Drop it into your Codex skills directory and invoke with:
+This project can be used as a skill for coding agents. Drop it into your agent's skills directory and invoke with:
 
 ```
-Use $feishu-whiteboard-har to extract whiteboards from this HAR and render SVG previews.
+Use lark-whiteboard-renderer to extract whiteboards from this HAR and render SVG previews.
 ```
 
 See `SKILL.md` for the full agent workflow spec.
