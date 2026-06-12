@@ -1,0 +1,73 @@
+{
+  "har": "/Users/liuyuan/.codex/skills/feishu-whiteboard-har/tests/fixtures/synthetic.har",
+  "entries": 7,
+  "whiteboard_blocks": 2,
+  "cdp_whiteboard_images": 3,
+  "blocks": [
+    {
+      "index": 0,
+      "entry": 0,
+      "nodes": 21,
+      "texts": 18,
+      "shapes": 16,
+      "connectors": 2,
+      "mindmap_nodes": 0,
+      "sticky_notes": 1,
+      "tables": 0,
+      "bbox": [
+        0.0,
+        0.0,
+        1520.0,
+        1080.0
+      ],
+      "samples": [
+        "圆角矩形",
+        "椭圆",
+        "菱形判断",
+        "数据库",
+        "虚线椭圆",
+        "主题卡片56",
+        "Agent 调度器",
+        "输出结果"
+      ],
+      "block_token": "SYNTH01",
+      "source_image": "whiteboard-01.source.png",
+      "source_image_entry": 2
+    },
+    {
+      "index": 1,
+      "entry": 1,
+      "nodes": 6,
+      "texts": 4,
+      "shapes": 4,
+      "connectors": 0,
+      "mindmap_nodes": 4,
+      "sticky_notes": 0,
+      "tables": 2,
+      "bbox": [
+        0.0,
+        -60.0,
+        940.0,
+        320.0
+      ],
+      "samples": [
+        "中心主题",
+        "右分支",
+        "右分支较长文字",
+        "左分支"
+      ],
+      "block_token": "SYNTH02",
+      "source_image": "whiteboard-02.source.jpg",
+      "source_image_entry": 3
+    }
+  ],
+  "unmatched_images": [
+    "whiteboard-extra-01.source.png"
+  ],
+  "related_images": [
+    "all-images/01-whiteboard-entry-2.source.png",
+    "all-images/02-whiteboard-entry-3.source.jpg",
+    "all-images/03-whiteboard-entry-4.source.png",
+    "all-images/04-doc-cover-entry-5.source.png"
+  ]
+}

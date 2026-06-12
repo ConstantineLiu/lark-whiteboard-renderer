@@ -26,7 +26,7 @@ python3 scripts/process_har.py <HAR文件路径> --out <输出目录>
 
 | 参数 | 说明 |
 |---|---|
-| `--out DIR` | 输出目录（默认：`./output`） |
+| `--out DIR` | 输出目录（默认：`./output/feishu-whiteboard-har/<har名>/`） |
 | `--extract-related-images` | 同时提取飞书文档封面图等页面图片 |
 | `--audit-package PATH` | 输出精简 JSON 审核包，供模型或 reviewer 审查 |
 | `--margin N` | SVG 画布边距，单位 px（默认：160） |
@@ -63,11 +63,22 @@ output/
 
 详见 `SKILL.md`。
 
+## 测试
+
+```bash
+python3 -m unittest discover tests      # 合成 HAR golden 回归（纯标准库）
+bash tests/run_real_har_check.sh        # 可选：与本地真实 HAR 基准快照 diff
+```
+
+渲染完全数据驱动：颜色来自飞书主题色板（`theme.fillColorCode`，从真实渲染采样反推）、显式 `fillV2` 或按形状的默认色，绝不依据节点文字内容。若有意变更渲染输出，用 `tests/regen_golden.sh` 重建基准并目检 diff。
+
 ## 已知限制
 
 - SVG 是对飞书原生渲染的近似还原，不是飞书官方渲染器
+- **SVG 文字基于 `foreignObject`：GitHub 等 Markdown 渲染器会剥离它，导致图形在、文字消失**。请在本地浏览器或 QuickLook 查看
 - 字体精确宽度受本机 SVG 渲染器和安装字体影响
-- 左侧思维导图分支、缺失表格 metadata、connector 起点箭头已有代码支持，但仍需更多真实 HAR 样本回归测试
+- 表格 `colSpan` 参与列数推导，但单元格不做视觉合并
+- 主题色板覆盖真实抓包中出现过的码值；未见过的码回退到显式色或形状默认色
 
 ## 隐私提醒
 
@@ -106,7 +117,7 @@ python3 scripts/process_har.py <path-to-har> --out <output-dir>
 
 | Flag | Description |
 |---|---|
-| `--out DIR` | Output directory (default: `./output`) |
+| `--out DIR` | Output directory (default: `./output/feishu-whiteboard-har/<har-name>/`) |
 | `--extract-related-images` | Also extract Feishu doc cover images and other page images |
 | `--audit-package PATH` | Write a compact JSON package for model / reviewer audit |
 | `--margin N` | SVG canvas margin in px (default: 160) |
@@ -143,11 +154,22 @@ Use lark-whiteboard-renderer to extract whiteboards from this HAR and render SVG
 
 See `SKILL.md` for the full agent workflow spec.
 
+### Testing
+
+```bash
+python3 -m unittest discover tests      # synthetic-HAR golden regression (stdlib only)
+bash tests/run_real_har_check.sh        # optional: diff against local real-HAR snapshots
+```
+
+Rendering is fully data-driven: colors come from the Feishu theme palette (`theme.fillColorCode`, sampled from real renders), explicit `fillV2`, or per-shape defaults — never from node text content. For intended output changes, regenerate the baseline with `tests/regen_golden.sh` and review the diff.
+
 ### Known Limitations
 
 - SVG output is an approximation — not Feishu's native renderer
+- **SVG text uses `foreignObject`: GitHub and some Markdown viewers strip it, so shapes render but text disappears.** View locally in a browser or QuickLook
 - Font metrics depend on your local SVG viewer and installed fonts
-- Left-side mind-map branches, missing table metadata, and connector start-arrows are supported but need more real-world HAR samples for regression
+- Table `colSpan` affects column counting but cells are not visually merged
+- The theme palette covers codes observed in real captures; unseen codes fall back to explicit fill or shape defaults
 
 ### Privacy
 

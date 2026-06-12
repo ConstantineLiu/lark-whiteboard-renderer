@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-"""Extract Feishu whiteboard assets from HAR and render simplified SVG previews."""
+"""Extract Feishu whiteboard assets from HAR and render simplified SVG previews.
+
+[INPUT]: 本地 .har 文件（Chrome DevTools 导出）；仅依赖 Python 3.10+ 标准库
+[OUTPUT]: whiteboard-XX.simple.svg / whiteboard-XX.source.* / summary.json /
+          index.md，可选 audit-package JSON 与 all-images/
+[POS]: feishu-whiteboard-har skill 的唯一执行入口，被 SKILL.md 工作流调用；
+       渲染规则全部数据驱动（主题色板 + 形状默认色），禁止按文字内容特判
+[PROTOCOL]: 变更时更新此头部，然后检查 SKILL.md；改渲染逻辑先跑 tests/
+"""
 
 from __future__ import annotations
 
 import argparse
 import base64
-import copy
 import html
 import json
 import math
@@ -18,19 +25,48 @@ from urllib.parse import parse_qs, urlparse
 
 SVG_NS = "http://www.w3.org/2000/svg"
 XHTML_NS = "http://www.w3.org/1999/xhtml"
+
+# ============================================================
+# 形状类型: 飞书 compositeShape.shapeType
+# ============================================================
+SHAPE_ROUND_RECT = 1
+SHAPE_ELLIPSE = 2
+SHAPE_CYLINDER = 4
+SHAPE_NODE = 8           # 流程图"处理"节点
+SHAPE_DIAMOND = 10       # 流程图"判断"菱形
+SHAPE_FRAME = 11         # 容器框
+SHAPE_DASHED_ELLIPSE = 13
+SHAPE_CARD = 56          # 主题卡片
+SHAPE_MIND_TEXT = 57     # 思维导图文本节点
+
+# ============================================================
+# 飞书主题色板: theme.fillColorCode -> 填充色
+# 由多份真实 HAR 的源图像素采样交叉验证反推。
+# 码值优先于 fillV2: 用户在 UI 换主题色只更新 code，旧 fillV2 残留。
+# ============================================================
 THEME_FILL = {
+    0: "#ffffff",
+    1: "#f0f4fc",
+    2: "#eae2fe",
+    6: "#fee3e2",
     8: "#f5f8ff",
-    10: "#517fd6",
+    9: "#856acb",
+    10: "#5178c6",
+    16: "#dff6e6",
 }
-THEME_TEXT = {
-    10: "#ffffff",
+
+# 节点无任何颜色数据时的形状默认填充（飞书流程图模板内置默认，源图采样验证）
+SHAPE_DEFAULT_FILL = {
+    SHAPE_NODE: "#f0f4fc",
+    SHAPE_ELLIPSE: "#eae2fe",
+    SHAPE_DIAMOND: "#fef1ce",
+    SHAPE_CARD: "#5178c6",
 }
-LIGHT_NODE_FILL = "#eef2ff"
+
 DARK_TEXT = "#1f2430"
 STICKY_FILL = "#fff0c2"
 MIND_LINE = "#5d82c8"
 MIND_TEXT_GAP = 8.0
-AUTO_FIT_TEXT = False
 
 
 def rgb(value: int | None, fallback: str = "#ffffff") -> str:
@@ -56,9 +92,9 @@ def theme_fill(info: dict[str, Any]) -> str | None:
     return THEME_FILL.get(code)
 
 
-def theme_text(info: dict[str, Any]) -> str | None:
-    code = info.get("theme", {}).get("fillColorCode")
-    return THEME_TEXT.get(code)
+def is_dark(color: str) -> bool:
+    r, g, b = (int(color[i : i + 2], 16) for i in (1, 3, 5))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b < 140
 
 
 def border_color(info: dict[str, Any]) -> str:
@@ -69,7 +105,9 @@ def border_color(info: dict[str, Any]) -> str:
 
 
 def connector_color(info: dict[str, Any]) -> str:
-    return first_color(info.get("fillV2")) or border_color(info)
+    # 连接线颜色只取 borderV2（缺省深灰）。真实数据里连接线的 fillV2
+    # 是无效占位（恒为 #bacefd），源图中的线条颜色始终跟随 border。
+    return border_color(info)
 
 
 def color_marker_key(color: str) -> str:
@@ -108,6 +146,8 @@ def base_rect(info: dict[str, Any]) -> tuple[float, float, float, float]:
 
 
 def absolute_nodes(nodes: list[dict[str, Any]], offset_x: float = 0, offset_y: float = 0, depth: int = 0) -> list[dict[str, Any]]:
+    # 只重建需要改坐标的两层 dict，children 留浅引用；deepcopy 会把整棵子树
+    # 复制一遍再递归重复复制，深嵌套大白板上是 O(n^2)。
     flattened: list[dict[str, Any]] = []
     for node in nodes:
         info = node.get("info") or {}
@@ -115,13 +155,9 @@ def absolute_nodes(nodes: list[dict[str, Any]], offset_x: float = 0, offset_y: f
         x = float(base.get("x", 0)) + offset_x
         y = float(base.get("y", 0)) + offset_y
 
-        copied = copy.deepcopy(node)
-        copied["_depth"] = depth
-        copied_info = copied.get("info") or {}
-        copied_base = copied_info.get("baseV2")
-        if isinstance(copied_base, dict):
-            copied_base["x"] = x
-            copied_base["y"] = y
+        copied = {**node, "_depth": depth}
+        if isinstance(info.get("baseV2"), dict):
+            copied["info"] = {**info, "baseV2": {**info["baseV2"], "x": x, "y": y}}
         flattened.append(copied)
 
         children = node.get("children") or []
@@ -134,64 +170,29 @@ def block_nodes(block_data: dict[str, Any]) -> list[dict[str, Any]]:
     return absolute_nodes(block_data.get("data", {}).get("nodes") or [])
 
 
-def is_output_node(info: dict[str, Any]) -> bool:
-    return node_text(info).replace(" ", "") in {"输出结果", "输出", "Output"}
-
-
-def is_agent_box(info: dict[str, Any], shape_type: int | None = None) -> bool:
-    actual_shape_type = shape_type if shape_type is not None else info.get("compositeShape", {}).get("shapeType")
-    return actual_shape_type == 8 and "agent" in node_text(info).lower()
-
-
-def effective_shape_fill(info: dict[str, Any], shape_type: int | None, *, circle_fill_fallback: str | None = None) -> str:
-    explicit_fill = first_color(info.get("fillV2"))
-    if shape_type == 56:
-        return explicit_fill or THEME_FILL[10]
-    if is_output_node(info) and shape_type == 8:
-        return LIGHT_NODE_FILL
-    if is_agent_box(info, shape_type):
-        return theme_fill(info) or explicit_fill or THEME_FILL[10]
-    if explicit_fill:
-        return explicit_fill
+def effective_shape_fill(info: dict[str, Any], shape_type: int | None) -> str:
+    # 三层规则，无内容特判: 主题码 > 显式 fillV2 > 形状默认色
     themed_fill = theme_fill(info)
     if themed_fill:
         return themed_fill
-    if shape_type == 2 and circle_fill_fallback:
-        return circle_fill_fallback
-    if shape_type == 8:
-        return LIGHT_NODE_FILL
-    return "#ffffff"
+    explicit_fill = first_color(info.get("fillV2"))
+    if explicit_fill:
+        return explicit_fill
+    return SHAPE_DEFAULT_FILL.get(shape_type, "#ffffff")
 
 
 def forced_text_color(info: dict[str, Any]) -> str | None:
+    # 与填充同构的两级规则，无逐形状特判:
+    # 主题码生效时文字色全自动对比（显式文字色同样视为残留）；
+    # 否则尊重显式文字色，缺失时按底色亮度反白。
+    themed_fill = theme_fill(info)
+    if themed_fill is not None:
+        return "#ffffff" if is_dark(themed_fill) else DARK_TEXT
     text_v2 = info.get("textV2") or {}
-    if info.get("compositeShape", {}).get("shapeType") == 56:
-        return THEME_TEXT[10]
-    if is_output_node(info):
-        return DARK_TEXT
-    if is_agent_box(info):
-        return THEME_TEXT[10]
     if first_color(text_v2.get("fill")):
         return None
-    explicit_fill = first_color(info.get("fillV2"))
-    fill = explicit_fill or theme_fill(info)
-    if fill == THEME_FILL.get(10):
-        return THEME_TEXT[10]
-    return None
-
-
-def dominant_shape_fill(nodes: list[dict[str, Any]], shape_type: int) -> str | None:
-    counts: dict[str, int] = {}
-    for node in nodes:
-        info = node.get("info", {})
-        if info.get("compositeShape", {}).get("shapeType") != shape_type:
-            continue
-        fill = first_color(info.get("fillV2")) or theme_fill(info)
-        if fill:
-            counts[fill] = counts.get(fill, 0) + 1
-    if not counts:
-        return None
-    return max(counts.items(), key=lambda item: item[1])[0]
+    shape_type = (info.get("compositeShape") or {}).get("shapeType")
+    return "#ffffff" if is_dark(effective_shape_fill(info, shape_type)) else None
 
 
 def bold_style_ids(text_v2: dict[str, Any]) -> set[str]:
@@ -395,7 +396,8 @@ def write_related_images(out_dir: Path, entries: list[dict[str, Any]]) -> list[s
             "",
             f"- entry: {image['entry']}",
             f"- source: [{name}]({name})",
-            f"- url: `{str(image['url'])[:240]}`",
+            # 去掉 query：飞书图片 URL 携带签名 token，写进输出会泄露访问凭证
+            f"- url: `{str(image['url']).split('?')[0][:240]}`",
             "",
         ]
     (target_dir / "index.md").write_text("\n".join(lines), encoding="utf-8")
@@ -417,29 +419,31 @@ def image_token(image: dict[str, Any]) -> str | None:
 
 
 def match_images_to_blocks(blocks: list[dict[str, Any]], images: list[dict[str, Any]]) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
-    by_token: dict[str, list[dict[str, Any]]] = {}
-    unclaimed = list(images)
-    for image in images:
+    # 图片身份用列表下标，不做整图 bytes 的值比较。
+    by_token: dict[str, list[int]] = {}
+    for image_index, image in enumerate(images):
         token = image_token(image)
         if token:
-            by_token.setdefault(token, []).append(image)
+            by_token.setdefault(token, []).append(image_index)
 
+    claimed: set[int] = set()
     matches: dict[int, dict[str, Any]] = {}
     for index, block in enumerate(blocks):
-        token = block_token(block)
-        candidates = by_token.get(token or "")
+        candidates = by_token.get(block_token(block) or "")
         if not candidates:
             continue
-        image = candidates.pop(0)
-        matches[index] = image
-        if image in unclaimed:
-            unclaimed.remove(image)
+        image_index = candidates.pop(0)
+        matches[index] = images[image_index]
+        claimed.add(image_index)
 
+    unclaimed = [i for i in range(len(images)) if i not in claimed]
     for index, _block in enumerate(blocks):
         if index in matches or not unclaimed:
             continue
-        matches[index] = unclaimed.pop(0)
-    return matches, unclaimed
+        image_index = unclaimed.pop(0)
+        matches[index] = images[image_index]
+        claimed.add(image_index)
+    return matches, [images[i] for i in range(len(images)) if i not in claimed]
 
 
 def node_bbox(node: dict[str, Any]) -> tuple[float, float, float, float]:
@@ -572,13 +576,13 @@ def text_div(
     return f'<div xmlns="{XHTML_NS}" style="{style}">{line_fragments(text_v2, text_align, h_justify)}</div>'
 
 
-def render_text(node: dict[str, Any]) -> str:
+def render_text(node: dict[str, Any], *, fit_text: bool = False) -> str:
     info = node["info"]
     text_v2 = info.get("textV2")
     if not text_v2 or not text_v2.get("text"):
         return ""
     x, y, width, height = base_rect(info)
-    is_mind_leaf = bool(info.get("mindMap")) and info.get("compositeShape", {}).get("shapeType") == 57
+    is_mind_leaf = bool(info.get("mindMap")) and info.get("compositeShape", {}).get("shapeType") == SHAPE_MIND_TEXT
     is_standalone_text = "compositeShape" not in info and not info.get("mindMap")
     clip = not (is_mind_leaf or is_standalone_text)
     return tag(
@@ -596,7 +600,7 @@ def render_text(node: dict[str, Any]) -> str:
             height,
             plain=is_standalone_text or is_mind_leaf,
             forced_color=forced_text_color(info),
-            fit=AUTO_FIT_TEXT and not (is_mind_leaf or is_standalone_text),
+            fit=fit_text and not (is_mind_leaf or is_standalone_text),
             clip=clip,
         ),
     )
@@ -633,7 +637,7 @@ def table_column_count(row_data: list[dict[str, Any]]) -> int:
     return count
 
 
-def render_table(node: dict[str, Any]) -> str:
+def render_table(node: dict[str, Any], *, fit_text: bool = False) -> str:
     info = node["info"]
     table = info.get("table") or {}
     meta = table.get("metaInfo", {})
@@ -685,7 +689,7 @@ def render_table(node: dict[str, Any]) -> str:
                             "height": f"{max(row_height - 8, 1):.3f}",
                             "overflow": "hidden",
                         },
-                        text_div(text_props, max(col_width - 8, 1), max(row_height - 8, 1), forced_color=DARK_TEXT, fit=AUTO_FIT_TEXT, clip=True),
+                        text_div(text_props, max(col_width - 8, 1), max(row_height - 8, 1), forced_color=DARK_TEXT, fit=fit_text, clip=True),
                     )
                 )
             cx += col_width
@@ -755,7 +759,7 @@ def render_sticky_note(node: dict[str, Any]) -> str:
     author = props.get("authorInfo", {}) if props.get("showAuthorInfo") else {}
     author_name = author.get("name") or author.get("enName") or ""
     footer_h = 28 if author_name else 0
-    text_v2 = copy.deepcopy(info.get("textV2") or {})
+    text_v2 = info.get("textV2") or {}
     parts = [
         tag(
             "rect",
@@ -815,10 +819,10 @@ def render_cylinder(common: dict[str, Any], x: float, y: float, width: float, he
     return f"<g>{body}{top}{bottom}</g>"
 
 
-def render_shape(node: dict[str, Any], *, circle_fill_fallback: str | None = None) -> str:
+def render_shape(node: dict[str, Any], *, fit_text: bool = False) -> str:
     info = node["info"]
     if "table" in info:
-        return render_table(node)
+        return render_table(node, fit_text=fit_text)
     if "stickyNoteProps" in info:
         return render_sticky_note(node)
     group = render_group(node)
@@ -827,21 +831,21 @@ def render_shape(node: dict[str, Any], *, circle_fill_fallback: str | None = Non
 
     x, y, width, height = base_rect(info)
     shape_type = info.get("compositeShape", {}).get("shapeType")
-    fill = effective_shape_fill(info, shape_type, circle_fill_fallback=circle_fill_fallback)
+    fill = effective_shape_fill(info, shape_type)
     stroke = border_color(info)
     stroke_width = line_width(info)
     common = {"fill": fill, "stroke": stroke, "stroke-width": stroke_width}
-    if shape_type == 1:
+    if shape_type == SHAPE_ROUND_RECT:
         radius = max(4, min(height / 2, width / 2))
         return tag("rect", {**common, "x": f"{x:.3f}", "y": f"{y:.3f}", "width": f"{width:.3f}", "height": f"{height:.3f}", "rx": f"{radius:.3f}", "ry": f"{radius:.3f}"})
-    if shape_type == 2:
+    if shape_type == SHAPE_ELLIPSE:
         return tag("ellipse", {**common, "cx": f"{x + width / 2:.3f}", "cy": f"{y + height / 2:.3f}", "rx": f"{width / 2:.3f}", "ry": f"{height / 2:.3f}"})
-    if shape_type == 4:
+    if shape_type == SHAPE_CYLINDER:
         return render_cylinder(common, x, y, width, height)
-    if shape_type == 10:
+    if shape_type == SHAPE_DIAMOND:
         points = [(x + width / 2, y), (x + width, y + height / 2), (x + width / 2, y + height), (x, y + height / 2)]
         return tag("polygon", {**common, "points": " ".join(f"{px:.3f},{py:.3f}" for px, py in points)})
-    if shape_type == 13:
+    if shape_type == SHAPE_DASHED_ELLIPSE:
         return tag(
             "ellipse",
             {
@@ -855,15 +859,59 @@ def render_shape(node: dict[str, Any], *, circle_fill_fallback: str | None = Non
                 "ry": f"{height / 2:.3f}",
             },
         )
-    if shape_type == 11:
+    if shape_type == SHAPE_FRAME:
         return tag("rect", {**common, "x": f"{x:.3f}", "y": f"{y:.3f}", "width": f"{width:.3f}", "height": f"{height:.3f}", "rx": 4, "ry": 4})
-    if shape_type == 56:
+    if shape_type == SHAPE_CARD:
         return tag("rect", {**common, "x": f"{x:.3f}", "y": f"{y:.3f}", "width": f"{width:.3f}", "height": f"{height:.3f}", "rx": 8, "ry": 8})
-    if shape_type == 57:
+    if shape_type == SHAPE_MIND_TEXT:
         return ""
     if shape_type is None:
         return ""
     return tag("rect", {**common, "x": f"{x:.3f}", "y": f"{y:.3f}", "width": f"{width:.3f}", "height": f"{height:.3f}", "rx": 6, "ry": 6})
+
+
+def point_along(points: list[tuple[float, float]], t: float) -> tuple[float, float]:
+    # 折线弧长参数 t (0..1) 处的坐标
+    segments = list(zip(points, points[1:]))
+    lengths = [math.dist(p0, p1) for p0, p1 in segments]
+    total = sum(lengths)
+    if total <= 0:
+        return points[0]
+    target = max(0.0, min(1.0, t)) * total
+    travelled = 0.0
+    for (p0, p1), seg in zip(segments, lengths):
+        if travelled + seg >= target and seg > 0:
+            ratio = (target - travelled) / seg
+            return (p0[0] + (p1[0] - p0[0]) * ratio, p0[1] + (p1[1] - p0[1]) * ratio)
+        travelled += seg
+    return points[-1]
+
+
+def render_connector_captions(info: dict[str, Any], points: list[tuple[float, float]]) -> list[str]:
+    # connectorV2.captions: 挂在连接线上的文字标签，t 为沿线位置
+    parts: list[str] = []
+    for caption in (info.get("connectorV2", {}).get("captions") or {}).get("data", []):
+        style = caption.get("textStyle") or {}
+        text = (style.get("text") or "").strip()
+        if not text:
+            continue
+        cx, cy = point_along(points, float(caption.get("t", 0.5)))
+        font_size = float(style.get("fontSize", 14))
+        lines = text.split("\n")
+        width = max(visual_units(line) for line in lines) * font_size + 16
+        height = len(lines) * font_size * 1.32 + 8
+        left, top = cx - width / 2, cy - height / 2
+        parts.append(
+            tag("rect", {"x": f"{left:.3f}", "y": f"{top:.3f}", "width": f"{width:.3f}", "height": f"{height:.3f}", "fill": "#ffffff"})
+        )
+        parts.append(
+            tag(
+                "foreignObject",
+                {"x": f"{left:.3f}", "y": f"{top:.3f}", "width": f"{width:.3f}", "height": f"{height:.3f}", "overflow": "visible"},
+                text_div(style, width, height, plain=True),
+            )
+        )
+    return parts
 
 
 def render_connector(node: dict[str, Any]) -> str:
@@ -882,7 +930,7 @@ def render_connector(node: dict[str, Any]) -> str:
     connect_style = info.get("theme", {}).get("connectStyleCode")
     dashed = connect_style == 3 or bool(advance.get("dashes"))
     color = connector_color(info)
-    return tag(
+    line = tag(
         "polyline",
         {
             "points": " ".join(f"{px:.3f},{py:.3f}" for px, py in points),
@@ -896,6 +944,7 @@ def render_connector(node: dict[str, Any]) -> str:
             "marker-start": f"url(#{arrow_marker_id(color, start=True)})" if int(advance.get("start", 0)) else None,
         },
     )
+    return "\n".join([line, *render_connector_captions(info, points)])
 
 
 def mind_text_width(info: dict[str, Any]) -> float:
@@ -911,7 +960,7 @@ def mind_text_width(info: dict[str, Any]) -> float:
 def mind_anchor_right(info: dict[str, Any]) -> float:
     x, _y, width, _height = base_rect(info)
     shape_type = (info.get("compositeShape") or {}).get("shapeType")
-    if shape_type != 57:
+    if shape_type != SHAPE_MIND_TEXT:
         return x + width
     text_right = mind_text_width(info) + MIND_TEXT_GAP
     return x + min(width, text_right)
@@ -920,7 +969,7 @@ def mind_anchor_right(info: dict[str, Any]) -> float:
 def mind_anchor_left(info: dict[str, Any]) -> float:
     x, _y, width, _height = base_rect(info)
     shape_type = (info.get("compositeShape") or {}).get("shapeType")
-    if shape_type != 57:
+    if shape_type != SHAPE_MIND_TEXT:
         return x
     # Keep the connector just outside the text box so it does not collide with visible glyphs.
     return x - min(MIND_TEXT_GAP, max(width * 0.25, 0))
@@ -983,7 +1032,7 @@ def connector_marker_defs(nodes: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
-def render_svg(block: dict[str, Any], title: str, *, square: bool = True, margin: float = 160) -> str:
+def render_svg(block: dict[str, Any], title: str, *, square: bool = True, margin: float = 160, fit_text: bool = False) -> str:
     nodes = block_nodes(block)
     min_x, min_y, max_x, max_y = board_bbox(nodes)
     view_x = min_x - margin
@@ -1006,26 +1055,29 @@ def render_svg(block: dict[str, Any], title: str, *, square: bool = True, margin
     mind_connectors = render_mind_connectors(nodes)
     connectors: list[str] = []
     container_shapes: list[str] = []
-    shapes: list[str] = []
+    sized_shapes: list[tuple[float, str]] = []
     texts: list[str] = []
-    circle_fill_fallback = dominant_shape_fill(nodes, 2)
     for node in nodes:
         info = node.get("info", {})
         if "connectorV2" in info:
             connectors.append(render_connector(node))
         else:
-            shape = render_shape(node, circle_fill_fallback=circle_fill_fallback)
+            shape = render_shape(node, fit_text=fit_text)
             is_container = (
                 "table" in info
                 or (bool(node.get("children")) and bool(info.get("title")))
-                or info.get("compositeShape", {}).get("shapeType") == 11
+                or info.get("compositeShape", {}).get("shapeType") == SHAPE_FRAME
             )
             if is_container:
                 container_shapes.append(shape)
             else:
-                shapes.append(shape)
+                _x, _y, width, height = base_rect(info)
+                sized_shapes.append((width * height, shape))
             if "stickyNoteProps" not in info:
-                texts.append(render_text(node))
+                texts.append(render_text(node, fit_text=fit_text))
+    # 数据无 zIndex 时按面积降序绘制: 大形状垫底，小形状浮上，
+    # 避免后出现的大框盖住先画的小节点（稳定排序保留同面积的文档序）
+    shapes = [shape for _area, shape in sorted(sized_shapes, key=lambda item: -item[0])]
     body = "\n".join(item for item in container_shapes + mind_connectors + connectors + shapes + texts if item)
     return f'''<svg xmlns="{SVG_NS}" width="{output_w:.0f}" height="{output_h:.0f}" viewBox="{view_x:.3f} {view_y:.3f} {view_w:.3f} {view_h:.3f}" role="img" aria-label="{html.escape(title, quote=True)}">
 <defs>
@@ -1275,7 +1327,6 @@ def write_index(out_dir: Path, har: Path, summaries: list[dict[str, Any]], image
 
 
 def main() -> None:
-    global AUTO_FIT_TEXT
     parser = argparse.ArgumentParser(description="Extract Feishu whiteboard PNGs and render simplified SVGs from a HAR.")
     parser.add_argument("har", type=Path, help="Path to .har file")
     parser.add_argument("--out", type=Path, default=None, help="Output directory")
@@ -1285,7 +1336,6 @@ def main() -> None:
     parser.add_argument("--extract-related-images", action="store_true", help="Also extract cdp-whiteboard and doc cover images to all-images/")
     parser.add_argument("--audit-package", type=Path, default=None, help="Write a compact HAR-derived JSON package for model/code review")
     args = parser.parse_args()
-    AUTO_FIT_TEXT = args.fit_text
 
     har = args.har.expanduser().resolve()
     out_dir = (args.out or default_out_dir(har)).expanduser().resolve()
@@ -1318,7 +1368,7 @@ def main() -> None:
     summaries = []
     for idx, block in enumerate(blocks):
         number = idx + 1
-        svg = render_svg(block["data"], f"{har.stem} whiteboard {number:02d}", square=not args.no_square, margin=args.margin)
+        svg = render_svg(block["data"], f"{har.stem} whiteboard {number:02d}", square=not args.no_square, margin=args.margin, fit_text=args.fit_text)
         (out_dir / f"whiteboard-{number:02d}.simple.svg").write_text(svg, encoding="utf-8")
         summary_item = block_summary(block, idx)
         summary_item["block_token"] = block_token(block)
